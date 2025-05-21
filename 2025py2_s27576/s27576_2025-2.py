@@ -1,118 +1,93 @@
 #!/usr/bin/env python3
 """
-NCBI GenBank Data Retriever
-Podstawowy skrypt do łączenia się z NCBI i pobierania rekordów sekwencji genetycznych dla danego identyfikatora taksonomicznego.
+Enhanced NCBI GenBank Data Retriever
+
+Funkcjonalności:
+- Filtrowanie długości sekwencji (min/max)
+- Generowanie raportu CSV
+- Tworzenie wykresu długości sekwencji
 """
 
-from Bio import Entrez
+from Bio import Entrez, SeqIO
 import time
-import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
-class NCBIRetriever:
-    def __init__(self, email, api_key):
-        """Initialize with NCBI credentials."""
-        self.email = email
-        self.api_key = api_key
+def run_search(tax_id, min_len, max_len, email, api_key):
+    Entrez.email = email
+    Entrez.api_key = api_key
 
-        # Ustawienia Entrez
-        Entrez.email = email
-        Entrez.api_key = api_key
-        Entrez.tool = 'BioScriptEx10'
+    # Utworzenie zapytania z filtrem długości sekwencji
+    query = f"txid{tax_id}[Organism] AND {min_len}:{max_len}[Sequence Length]"
+    handle = Entrez.esearch(db="nucleotide", term=query, usehistory="y", retmax=0)
+    result = Entrez.read(handle)
 
-    def search_taxid(self, taxid):
-        """Search for all records associated with a taxonomic ID."""
-        print(f"Searching for records with taxID: {taxid}")
-        try:
-            # Najpierw pobierz informacje taksonomiczne
-            handle = Entrez.efetch(db="taxonomy", id=taxid, retmode="xml")
-            records = Entrez.read(handle)
-            organism_name = records[0]["ScientificName"]
-            print(f"Organism: {organism_name} (TaxID: {taxid})")
+    # Zwracamy liczbę rekordów oraz informacje potrzebne do pobrania wyników
+    return int(result["Count"]), result["WebEnv"], result["QueryKey"]
 
-            # Szukaj rekordów
-            search_term = f"txid{taxid}[Organism]"
-            handle = Entrez.esearch(db="nucleotide", term=search_term, usehistory="y")
-            search_results = Entrez.read(handle)
-            count = int(search_results["Count"])
 
-            if count == 0:
-                print(f"No records found for {organism_name}")
-                return None
+def fetch(webenv, query_key, start, batch_size=100):
+    handle = Entrez.efetch(
+        db="nucleotide", rettype="gb", retmode="text",
+        retstart=start, retmax=batch_size,
+        webenv=webenv, query_key=query_key
+    )
 
-            print(f"Found {count} records")
+    return list(SeqIO.parse(handle, "gb"))
 
-            # Zapisz wyniki wyszukiwania do późniejszego wykorzystania
-            self.webenv = search_results["WebEnv"]
-            self.query_key = search_results["QueryKey"]
-            self.count = count
 
-            return count
+def save_outputs(records, tax_id):
+    # Tworzy DataFrame z danych i sortuje wg długości
+    data = [{"accession": rec.id, "length": len(rec.seq), "description": rec.description} for rec in records]
+    df = pd.DataFrame(data).sort_values("length", ascending=False)
 
-        except Exception as e:
-            print(f"Error searching TaxID {taxid}: {e}")
-            return None
+    # Zapis danych do pliku CSV
+    csv_path = f"taxid_{tax_id}.csv"
+    df.to_csv(csv_path, index=False)
 
-    def fetch_records(self, start=0, max_records=10):
-        """Fetch a batch of records using the stored search results."""
-        if not hasattr(self, 'webenv') or not hasattr(self, 'query_key'):
-            print("No search results to fetch. Run search_taxid() first.")
-            return []
-
-        try:
-            # Limit, aby zapobiec przeciążeniu serwera
-            batch_size = min(max_records, 500)
-
-            handle = Entrez.efetch(
-                db="nucleotide",
-                rettype="gb",
-                retmode="text",
-                retstart=start,
-                retmax=batch_size,
-                webenv=self.webenv,
-                query_key=self.query_key
-            )
-
-            # Surowy rekord GenBank
-            records_text = handle.read()
-
-            return records_text
-
-        except Exception as e:
-            print(f"Error fetching records: {e}")
-            return ""
+    # Generowanie wykresu długości sekwencji
+    plt.figure(figsize=(12, 6))
+    plt.plot(df["length"].values, marker='o')
+    accessions = df["accession"].values
+    spacing = max(1, len(accessions) // 20)
+    plt.xticks(range(0, len(accessions), spacing), accessions[::spacing], rotation=90, fontsize=6)
+    plt.xlabel("Accession")
+    plt.ylabel("Sequence Length")
+    plt.title(f"Sequence lengths - TaxID {tax_id}")
+    plt.tight_layout()
+    plt.savefig(f"taxid_{tax_id}.png")
 
 
 def main():
-    # Uzyskaj dane uwierzytelniające
-    email = input("Enter your email address for NCBI: ")
-    api_key = input("Enter your NCBI API key: ")
+    # Pobieranie danych od użytkownika
+    email = input("Enter NCBI email: ")
+    api_key = input("Enter NCBI API key: ")
+    tax_id = input("Enter TaxID of the organism: ")
+    min_len = input("Enter min sequence length: ")
+    max_len = input("Enter max sequence length: ")
 
-    # Utwórz obiekt retriever
-    retriever = NCBIRetriever(email, api_key)
+    # Wyszukiwanie rekordów
+    count, webenv, qkey = run_search(tax_id, min_len, max_len, email, api_key)
 
-    # Uzyskaj taxid od użytkownika
-    taxid = input("Enter taxonomic ID (taxid) of the organism: ")
-
-    # Szukaj rekordów
-    count = retriever.search_taxid(taxid)
-
-    if not count:
-        print("No records found. Exiting.")
+    if count == 0:
+        print("No records found:(")
         return
 
-    # Pobierz kilka pierwszych rekordów jako próbkę
-    print("\nFetching sample records...")
-    sample_records = retriever.fetch_records(start=0, max_records=5)
+    print(f"Found {count} records, downloading...")
 
-    # Zapisz do pliku
-    output_file = f"taxid_{taxid}_sample.gb"
-    with open(output_file, "w") as f:
-        f.write(sample_records)
+    all_records = []
+    for i in range(0, min(count, 1000), 100):
+        batch = fetch(webenv, qkey, i)
+        all_records.extend(batch)
+        time.sleep(0.4)
 
-    print(f"Saved sample records to {output_file}")
-    print("\nNote: This is just a basic retriever. You need to extend its functionality!")
-
+    save_outputs(all_records, tax_id)
+    print("Done")
 
 if __name__ == "__main__":
     main()
+
+
